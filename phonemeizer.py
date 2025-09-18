@@ -274,73 +274,63 @@ class PhonemeAnalyzer:
             print("ERROR: 'words' is not in the expected format. Debugging output:", words)
             return
 
-        # Get total duration of the waveform in seconds
-        total_duration = librosa.get_duration(y=y, sr=sr)
+        # Generate and plot the spectrogram
+        D = librosa.stft(y)
+        S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+        librosa.display.specshow(S_db, sr=sr, x_axis='time', y_axis='log')
+        plt.colorbar(format='%+2.0f dB')
 
-        # Generate time axis for waveform
-        time_axis = np.linspace(0, total_duration, len(y))
-        plt.plot(time_axis, y, alpha=0.6, label="Waveform")
+        y_min, y_max = plt.gca().get_ylim()
+        rect_height = y_max - y_min
 
         if mode in ["#word", "#both"]:
             # Apply word overlays & labels
             for word_start, word_end in word_segments:
-                for segment_start, segment_end in self.speech_segments:
-                    if segment_start <= word_start <= segment_end:
-                        start = word_start / total_duration
-                        end = word_end / total_duration
-                        color = random.choice(self.colors)
+                color = random.choice(self.colors)
 
-                        # Word overlay (full height)
-                        plt.gca().add_patch(
-                            Rectangle((start * total_duration, -1),  
-                                    (end - start) * total_duration,
-                                    2, color=color, alpha=0.3)
-                        )
+                # Word overlay (full height)
+                plt.gca().add_patch(
+                    Rectangle((word_start, y_min),
+                            word_end - word_start,
+                            rect_height, color=color, alpha=0.3)
+                )
 
-                        # Get the actual word text safely
-                        word_text = next((w.get('text', "UNKNOWN") for w in words 
-                                        if isinstance(w, dict) and abs(w.get('start', -99) - word_start) < 0.01), 
-                                        "UNKNOWN")
+                # Get the actual word text safely
+                word_text = next((w.get('text', "UNKNOWN") for w in words
+                                if isinstance(w, dict) and abs(w.get('start', -99) - word_start) < 0.01),
+                                "UNKNOWN")
 
-                        # Word label centered inside the patch
-                        plt.text((start + end) / 2 * total_duration, 1.25, 
-                                word_text, fontsize=10, ha='center', va='center', color='black')
+                # Word label centered above the patch
+                plt.text((word_start + word_end) / 2, y_max * 1.3,
+                        word_text, fontsize=10, ha='center', va='center', color='black')
 
-                        if mode == "#both":
-                            # Thinner dashed extension lines for word boundaries
-                            plt.plot([start * total_duration, start * total_duration], 
-                                    [-1, 1.0], color='black', linestyle='dashed', linewidth=0.5)
-                            plt.plot([end * total_duration, end * total_duration], 
-                                    [-1, 1.0], color='black', linestyle='dashed', linewidth=0.5)
-
-                        break  # Stop checking once a valid speech segment is found
+                if mode == "#both":
+                    # Thinner dashed extension lines for word boundaries
+                    plt.plot([word_start, word_start],
+                            [y_min, y_max], color='black', linestyle='dashed', linewidth=0.5)
+                    plt.plot([word_end, word_end],
+                            [y_min, y_max], color='black', linestyle='dashed', linewidth=0.5)
 
         if mode in ["#phoneme", "#both"]:
             # Apply phoneme overlays & labels
             for phoneme in phonemes:
-                for segment_start, segment_end in self.speech_segments:
-                    if segment_start <= phoneme["start"] <= segment_end:
-                        start = phoneme["start"] / total_duration
-                        end = phoneme["end"] / total_duration
-                        color = random.choice(self.colors)
+                color = random.choice(self.colors)
 
-                        # Phoneme overlay (full height)
-                        plt.gca().add_patch(
-                            Rectangle((start * total_duration, -1),  
-                                    (end - start) * total_duration,
-                                    2, color=color, alpha=0.5)
-                        )
+                # Phoneme overlay (full height)
+                plt.gca().add_patch(
+                    Rectangle((phoneme["start"], y_min),
+                            phoneme["end"] - phoneme["start"],
+                            rect_height, color=color, alpha=0.5)
+                )
 
-                        # IPA phoneme label centered ABOVE the patch
-                        plt.text((start + end) / 2 * total_duration, 1.05,  # Raised to 1.3
-                                phoneme["phoneme"], fontsize=9, ha='center', va='center', color='black')
-                        break  # Stop checking once a valid speech segment is found
+                # IPA phoneme label centered ABOVE the patch
+                plt.text((phoneme["start"] + phoneme["end"]) / 2, y_max * 1.1,
+                        phoneme["phoneme"], fontsize=9, ha='center', va='center', color='black')
 
         plt.xlabel("Time (s)")
-        plt.ylabel("Amplitude")
-        plt.ylim(-1.2, 1.5)  # Increase space above waveform
+        plt.ylabel("Frequency (Hz)")
+        plt.ylim(y_min, y_max * 1.4)
         plt.grid(True)
-        plt.legend()
         return plt
 
 

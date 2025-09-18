@@ -22,12 +22,11 @@ class PhonemeAnalyzer:
         self.colors.extend(sns.color_palette('husl', n_colors=30))
         
         try:
-            self.transcriber = pipeline(
+            self.word_transcriber = pipeline(
                 "automatic-speech-recognition",
                 model="openai/whisper-base",
-                chunk_length_s=30,
-                return_timestamps=True,
-                generate_kwargs={"language": "en"}  # Force English transcription
+                return_timestamps="word",
+                generate_kwargs={"language": "en"}
             )
         except Exception as e:
             print(f"Error initializing transcriber: {str(e)}")
@@ -50,11 +49,21 @@ class PhonemeAnalyzer:
     
     def get_phonemes_espeak(self, text):
         try:
-            cmd = ['espeak', '-q', '--ipa', '-v', 'en-us', text]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            return result.stdout.strip().split()
+            # Use a unique separator for phonemes
+            separator = "_"
+            cmd = ['espeak', '-q', '--ipa', f'--sep={separator}', '-v', 'en-us', text]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+            # Split the output by the separator
+            phonemes = result.stdout.strip().split(separator)
+            # Remove any empty strings that may result from the split
+            return [p for p in phonemes if p]
+
         except FileNotFoundError:
-            print("Error: espeak not found. Please install it using: brew install espeak")
+            print("Error: espeak not found. Please install it using: sudo apt-get install espeak")
+            return None
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing espeak: {e}")
             return None
         
     def detect_speech_activity(self, y, sr):
@@ -97,89 +106,46 @@ class PhonemeAnalyzer:
         self.audio_duration = librosa.get_duration(y=y, sr=sr)
         
         try:
-            speech_segments = self.detect_speech_activity(y, sr)
+            # Although we detect speech activity, we'll rely on Whisper's timestamps primarily.
+            # This detection can be used for other purposes, like filtering out non-speech audio if needed.
+            self.speech_segments = self.detect_speech_activity(y, sr)
             print("\nDEBUG: Speech detection complete")
-            print(f"DEBUG: Found segments: {speech_segments}")
-            
-            if not speech_segments:
+            print(f"DEBUG: Found segments: {self.speech_segments}")
+
+            if not self.speech_segments:
                 print("No speech segments detected")
                 return []
-            
-            # Get total speech duration
-            total_speech_duration = sum(end - start for start, end in speech_segments)
-            print(f"DEBUG: Total speech duration: {total_speech_duration}")
-            
-            result = self.transcriber(wav_path, return_timestamps=True)
+
+            result = self.word_transcriber(wav_path)
             print("\nDEBUG: Transcription complete")
             print(f"DEBUG: Raw result: {result}")
-            
+
             words = []
-            word_segments = []
-            
             if 'chunks' in result:
-                for chunk_idx, chunk in enumerate(result['chunks']):
-                    print(f"\nDEBUG: Processing chunk {chunk_idx}")
-                    if not chunk['text'].strip():
-                        print("DEBUG: Empty chunk, skipping")
-                        continue
-                        
-                    phrase_text = chunk['text'].strip()
-                    split_words = [w.strip('.,!?') for w in phrase_text.split()]
-                    split_words = [w for w in split_words if w]
-                    
-                    print(f"DEBUG: Split words: {split_words}")
-                    
-                    if not split_words:
-                        print("DEBUG: No valid words after splitting")
+                for chunk in result['chunks']:
+                    word_text = chunk['text'].strip('.,!?')
+                    if not word_text:
                         continue
                     
-                    # Calculate time per word
-                    time_per_word = total_speech_duration / len(split_words)
-                    print(f"DEBUG: Time per word: {time_per_word}")
+                    timestamp = chunk['timestamp']
+                    word_entry = {
+                        "text": word_text,
+                        "start": timestamp[0],
+                        "end": timestamp[1]
+                    }
                     
-                    # Process each word
-                    for word_idx, word in enumerate(split_words):
-                        print(f"\nDEBUG: Processing word {word_idx}: {word}")
-                        
-                        try:
-                            # Assign word timings within detected speech segments
-                            for segment_start, segment_end in speech_segments:
-                                segment_duration = segment_end - segment_start
-                                words_in_segment = [w for w in words if segment_start <= w['start'] < segment_end]
+                    if word_entry["end"] is None:
+                        print(f"DEBUG: Skipping word with null end time: {word_entry['text']}")
+                        continue
 
-                                if not words_in_segment:
-                                    continue  # Skip segments with no detected words
-
-                                time_per_word = segment_duration / len(words_in_segment)
-
-                                for i, word in enumerate(words_in_segment):
-                                    word['start'] = segment_start + (i * time_per_word)
-                                    word['end'] = min(word['start'] + time_per_word, segment_end)
-                            
-                            print(f"DEBUG: Calculated timings - Start: {word_start:.3f}, End: {word_end:.3f}")
-                            
-                            if word_end <= word_start:
-                                print(f"DEBUG: Invalid timing for word {word}")
-                                continue
-                                
-                            word_entry = {
-                                "text": word,
-                                "start": word_start,
-                                "end": word_end
-                            }
-                            
-                            words.append(word_entry)
-                            word_segments.append((word_start, word_end))
-                            print(f"Word: {word} | Start: {word_start:.3f}, End: {word_end:.3f}")
-                            
-                        except Exception as e:
-                            print(f"DEBUG: Error processing word {word}: {str(e)}")
-                            traceback.print_exc()
+                    words.append(word_entry)
+                    print(f"Word: {word_entry['text']} | Start: {word_entry['start']:.3f}, End: {word_entry['end']:.3f}")
             
             print("\nDEBUG: Word processing complete")
             print(f"DEBUG: Total words processed: {len(words)}")
             
-            self.word_segments = word_segments
+            # For visualization purposes
+            self.word_segments = [(w['start'], w['end']) for w in words]
             return words
             
         except Exception as e:
@@ -187,78 +153,14 @@ class PhonemeAnalyzer:
             traceback.print_exc()
             return []
 
-    
-    def extract_words_from_audio(self, wav_path):
-        y, sr = librosa.load(wav_path)
-        self.audio_duration = librosa.get_duration(y=y, sr=sr)
-        
-        speech_segments = self.detect_speech_activity(y, sr)
-        if not speech_segments:
-            print("No speech segments detected")
-            return []
-        
-        print(f"DEBUG: Speech segments found: {speech_segments}")
-        words = []
-        
-        try:
-            result = self.transcriber(wav_path, return_timestamps=True)
-            print("Raw transcriber result:", result)
-            
-            if 'chunks' in result:
-                for chunk in result['chunks']:
-                    phrase_text = chunk['text'].strip()
-                    split_words = phrase_text.split()
-                    print(f"\nProcessing words: {split_words}")
-                    
-                    if not split_words:
-                        continue
-                    
-                    # Get segment timing
-                    segment_start, segment_end = speech_segments[0]
-                    segment_duration = segment_end - segment_start
-                    
-                    # Calculate word timings
-                    word_duration = segment_duration / len(split_words)
-                    
-                    # Process each word
-                    for i, word in enumerate(split_words):
-                        try:
-                            # Calculate word timing
-                            word_start = segment_start + (i * word_duration)
-                            word_end = word_start + word_duration
-                            
-                            # Ensure we don't exceed segment boundary
-                            if word_end > segment_end:
-                                word_end = segment_end
-                            
-                            # Create word entry
-                            word_entry = {
-                                "text": word.strip('.,!?'),
-                                "start": word_start,
-                                "end": word_end
-                            }
-                            
-                            words.append(word_entry)
-                            print(f"Word: {word} | Start: {word_start:.3f}, End: {word_end:.3f}")
-                            
-                        except Exception as e:
-                            print(f"Error processing individual word: {str(e)}")
-                            continue
-            
-            return words
-            
-        except Exception as e:
-            print(f"Error during transcription: {str(e)}")
-            traceback.print_exc()
-            return words  # Return any words we've managed to process
-
 
     
-    def process_audio(self, mode="#both"):
+    def process_audio(self, mp3_path=None, mode="#both"):
         try:
-            mp3_path = self.select_file()
-            if not mp3_path:
-                return
+            if mp3_path is None:
+                mp3_path = self.select_file()
+                if not mp3_path:
+                    return
 
             print("\nDEBUG: Starting audio processing")
             wav_path = self.convert_to_wav(mp3_path)
@@ -268,12 +170,8 @@ class PhonemeAnalyzer:
             words = self.extract_words_from_audio(wav_path)
             print(f"DEBUG: Extracted {len(words)} words: {words}")
 
-            word_segments = [(word['start'], word['end']) for word in words]
+            word_segments = self.word_segments
             print(f"DEBUG: Generated word segments: {word_segments}")
-
-            print("DEBUG: Getting speech segments")
-            self.speech_segments = self.detect_speech_activity(y, sr)
-            print(f"DEBUG: Speech segments: {self.speech_segments}")
 
             print("DEBUG: Generating phoneme timings")
             phonemes = self.create_phoneme_timings(words)
@@ -286,7 +184,10 @@ class PhonemeAnalyzer:
                 print("ERROR: Visualization failed, returning early.")
                 return
 
-            plot.show()
+            output_path = "output.png"
+            plot.savefig(output_path)
+            print(f"Visualization saved to {output_path}")
+            plot.close()  # Close the plot to free memory
             os.unlink(wav_path)
 
         except Exception as e:
@@ -326,24 +227,8 @@ class PhonemeAnalyzer:
                     print(f"DEBUG: Empty phoneme string for {word_text}")
                     continue
                 
-                if not isinstance(phoneme_string, list):
-                    print(f"DEBUG: Unexpected phoneme_string type: {type(phoneme_string)}")
-                    phoneme_string = [str(phoneme_string)]
-                
-                # Use regex to extract phonemes
-                # Use regex to extract complete IPA symbols
-                phoneme_list = []
-                for ps in phoneme_string:
-                    # Pattern to match common English IPA symbols including digraphs
-                    ipa_pattern = r'tʃ|dʒ|eɪ|aɪ|ɔɪ|aʊ|oʊ|θ|ð|ʃ|ʒ|ŋ|[ɑɔæʌəɛɪʊɜː]|[ptkmn]|[bdgw]|[lfvs]|[rjh]|[ˈˌ]'
-                    matches = re.findall(ipa_pattern, str(ps))
-                    phoneme_list.extend([m for m in matches if m.strip()])
-                
-                print(f"DEBUG: Extracted phoneme list: {phoneme_list}")
-                
-                if not phoneme_list:
-                    print(f"DEBUG: No valid phonemes found for {word_text}")
-                    continue
+                phoneme_list = phoneme_string
+                print(f"DEBUG: Phoneme list: {phoneme_list}")
                 
                 duration = end - start
                 if duration <= 0:
@@ -465,4 +350,4 @@ class PhonemeAnalyzer:
 
 if __name__ == "__main__":
     analyzer = PhonemeAnalyzer()
-    analyzer.process_audio(mode="#phonemex")
+    analyzer.process_audio(mp3_path="ladies-make.mp3", mode="#both")
